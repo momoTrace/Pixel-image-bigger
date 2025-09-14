@@ -1,0 +1,211 @@
+<!doctype html>
+
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PNG 每像素放大工具（Nearest Neighbor）</title>
+  <style>
+    :root{--bg:#0f172a;--card:#0b1220;--accent:#7dd3fc;--muted:#94a3b8}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans CJK SC",Helvetica,Arial}
+    body{background:linear-gradient(180deg,var(--bg),#071129);color:#e6eef8;display:flex;align-items:center;justify-content:center;padding:20px}
+    .card{width:100%;max-width:820px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border-radius:12px;padding:18px;box-shadow:0 6px 30px rgba(2,6,23,0.6)}
+    h1{font-size:18px;margin:0 0 8px}
+    p.desc{margin:0 0 12px;color:var(--muted);font-size:13px}
+    .row{display:flex;gap:10px;align-items:center}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+    input[type=number]{width:84px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    button{padding:8px 12px;border-radius:8px;border:0;background:var(--accent);color:#042133;font-weight:600}
+    .drop{border:2px dashed rgba(255,255,255,0.06);border-radius:10px;padding:18px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;min-height:160px}
+    .drop.dragover{border-color:rgba(125,211,252,0.7);box-shadow:0 6px 18px rgba(125,211,252,0.06)}
+    .preview{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+    canvas{background:transparent;image-rendering:pixelated;border-radius:6px}
+    .meta{color:var(--muted);font-size:13px}
+    a.download-link{display:inline-block;margin-left:8px;color:var(--accent);text-decoration:none}
+    footer{margin-top:12px;color:var(--muted);font-size:12px}
+    @media (max-width:520px){.row{flex-direction:column;align-items:flex-start}.controls{width:100%}input[type=number]{width:100%}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>PNG 每像素放大（Nearest Neighbor / 最近邻）</h1>
+    <p class="desc">把每个像素扩展为 N×N（默认 5×5），适合像素画/表盘元素等需要保持硬边的场景。无需上传到服务器，所有处理在本地浏览器完成，支持安卓浏览器。</p><div class="controls row">
+  <label>放大倍数：
+    <input id="scale" type="number" min="1" value="5" />
+  </label>
+  <label style="display:flex;gap:8px;align-items:center">保持透明通道<input id="preserveAlpha" type="checkbox" checked style="width:18px;height:18px;"/></label>
+  <button id="chooseFile">选择图片</button>
+  <button id="pasteBtn">粘贴图片（剪贴板）</button>
+  <button id="processBtn">处理并下载</button>
+  <input id="fileInput" type="file" accept="image/png" style="display:none" />
+</div>
+
+<div id="drop" class="drop" tabindex="0">
+  <div style="text-align:center">
+    <div style="font-weight:600">拖拽 PNG 到这里，或点击“选择图片”</div>
+    <div class="meta">支持透明通道（默认保留）。处理后会自动触发下载。</div>
+  </div>
+</div>
+
+<div class="preview" id="previewArea"></div>
+
+<footer>小提示：若要严格的像素化效果，请确保原图已是按像素网格对齐（无半透明羽化）。</footer>
+
+  </div>  <script>
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('fileInput');
+    const chooseFile = document.getElementById('chooseFile');
+    const processBtn = document.getElementById('processBtn');
+    const previewArea = document.getElementById('previewArea');
+    const scaleInput = document.getElementById('scale');
+    const pasteBtn = document.getElementById('pasteBtn');
+    const preserveAlpha = document.getElementById('preserveAlpha');
+
+    let currentImage = null;
+
+    chooseFile.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleFile(f);
+    });
+
+    pasteBtn.addEventListener('click', async ()=>{
+      try{
+        const items = await navigator.clipboard.read();
+        for(const item of items){
+          for(const type of item.types){
+            if(type.startsWith('image')){
+              const blob = await item.getType(type);
+              handleFile(blob);
+              return;
+            }
+          }
+        }
+        alert('剪贴板未发现图片。');
+      }catch(err){
+        alert('无法访问剪贴板：' + err.message);
+      }
+    });
+
+    // Drag & drop
+    ['dragenter','dragover'].forEach(ev=>{
+      drop.addEventListener(ev, e=>{e.preventDefault();e.stopPropagation();drop.classList.add('dragover');});
+    });
+    ['dragleave','drop'].forEach(ev=>{
+      drop.addEventListener(ev, e=>{e.preventDefault();e.stopPropagation();drop.classList.remove('dragover');});
+    });
+    drop.addEventListener('drop', e=>{
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if(f) handleFile(f);
+    });
+
+    // Handle file
+    function handleFile(file){
+      if(!file.type.includes('png') && !file.name.toLowerCase().endsWith('.png')){
+        if(!confirm('选择的文件似乎不是 PNG，仍要尝试处理吗？')) return;
+      }
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = ()=>{
+        currentImage = img;
+        renderPreview(img);
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = ()=>{ alert('无法加载图片，请确认文件未损坏。'); URL.revokeObjectURL(url); };
+      img.src = url;
+    }
+
+    function renderPreview(img){
+      previewArea.innerHTML = '';
+      // show small preview canvas (original)
+      const canvasOrig = document.createElement('canvas');
+      canvasOrig.width = img.naturalWidth;
+      canvasOrig.height = img.naturalHeight;
+      const ctx = canvasOrig.getContext('2d');
+      ctx.drawImage(img,0,0);
+      canvasOrig.style.width = Math.min(160, img.naturalWidth*20) + 'px';
+      canvasOrig.style.height = 'auto';
+      canvasOrig.title = `原图： ${img.naturalWidth} × ${img.naturalHeight}`;
+      previewArea.appendChild(canvasOrig);
+
+      const info = document.createElement('div');
+      info.className = 'meta';
+      info.textContent = `原始尺寸：${img.naturalWidth} × ${img.naturalHeight}`;
+      previewArea.appendChild(info);
+    }
+
+    processBtn.addEventListener('click', async ()=>{
+      if(!currentImage){ alert('请先选择或拖拽一张 PNG 图片。'); return; }
+      let scale = parseInt(scaleInput.value) || 5;
+      if(scale < 1) scale = 1;
+      await processAndDownload(currentImage, scale, preserveAlpha.checked);
+    });
+
+    async function processAndDownload(img, scale, keepAlpha){
+      // Create source canvas
+      const sw = img.naturalWidth, sh = img.naturalHeight;
+      const src = document.createElement('canvas');
+      src.width = sw; src.height = sh;
+      const sctx = src.getContext('2d');
+      sctx.drawImage(img,0,0);
+
+      // Destination canvas
+      const dw = sw * scale, dh = sh * scale;
+      const dst = document.createElement('canvas');
+      dst.width = dw; dst.height = dh;
+      const dctx = dst.getContext('2d');
+
+      // Nearest neighbor: disable smoothing
+      dctx.imageSmoothingEnabled = false;
+      // Draw scaled
+      dctx.drawImage(src, 0, 0, sw, sh, 0, 0, dw, dh);
+
+      // If user doesn't want to keep alpha, flatten onto white
+      if(!keepAlpha){
+        const flat = document.createElement('canvas');
+        flat.width = dw; flat.height = dh;
+        const fctx = flat.getContext('2d');
+        fctx.fillStyle = '#ffffff';
+        fctx.fillRect(0,0,dw,dh);
+        fctx.drawImage(dst,0,0);
+        // replace dst
+        dst.width = flat.width; dst.height = flat.height;
+        dctx.clearRect(0,0,dw,dh);
+        dctx.drawImage(flat,0,0);
+      }
+
+      // Show resulting preview
+      previewArea.innerHTML = '';
+      const small = document.createElement('canvas');
+      small.width = dw; small.height = dh;
+      small.getContext('2d').drawImage(dst,0,0);
+      // scale display size for UX (but keep actual pixels intact)
+      const maxDisplay = 320;
+      const displayWidth = Math.min(maxDisplay, dw);
+      small.style.width = displayWidth + 'px';
+      small.style.height = 'auto';
+      previewArea.appendChild(small);
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `输出尺寸： ${dw} × ${dh} （放大 ×${scale}）`;
+      previewArea.appendChild(meta);
+
+      // Convert to blob and download
+      dst.toBlob(function(blob){
+        const a = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        a.href = url;
+        const nameBase = (document.querySelector('input[type=file]') && document.querySelector('input[type=file]').files[0]?.name) || 'image.png';
+        const outName = nameBase.replace(/\.png$/i,'') + `_x${scale}.png`;
+        a.download = outName;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1500);
+      }, 'image/png');
+    }
+
+    // keyboard accessibility: Enter to open file
+    drop.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') fileInput.click(); });
+  </script></body>
+</html>
